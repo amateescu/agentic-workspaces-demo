@@ -1,0 +1,776 @@
+tool_belt #3616166 (MR !35 at 12d174ffb2), against 1.0.x.
+diff --git a/composer.json b/composer.json
+index 7685f4d966273bdd5503abd7a189cb5456c36b76..f49b0fad8cb526942c7ed4da215d0564d18d025f 100644
+--- a/composer.json
++++ b/composer.json
+@@ -10,5 +10,8 @@
+     },
+     "require": {
+         "drupal/tool": "^1.0.0-beta10"
++    },
++    "require-dev": {
++        "drupal/pathauto": "^1.13"
+     }
+ }
+diff --git a/modules/tool_belt_content/src/Hook/ManualPathAliasHooks.php b/modules/tool_belt_content/src/Hook/ManualPathAliasHooks.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b2883ac14779677be70fb089df15d5f46cecfdc
+--- /dev/null
++++ b/modules/tool_belt_content/src/Hook/ManualPathAliasHooks.php
+@@ -0,0 +1,31 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\tool_belt_content\Hook;
++
++use Drupal\Core\Entity\EntityInterface;
++use Drupal\Core\Entity\ContentEntityInterface;
++use Drupal\Core\Hook\Attribute\Hook;
++use Drupal\tool_belt_content\ManualPathAlias;
++
++/**
++ * Applies aliases set through a tool when their entity is saved.
++ */
++final class ManualPathAliasHooks {
++
++  public function __construct(
++    private readonly ManualPathAlias $manualPathAlias,
++  ) {}
++
++  /**
++   * Implements hook_entity_presave().
++   */
++  #[Hook('entity_presave')]
++  public function entityPresave(EntityInterface $entity): void {
++    if ($entity instanceof ContentEntityInterface) {
++      $this->manualPathAlias->apply($entity);
++    }
++  }
++
++}
+diff --git a/modules/tool_belt_content/src/ManualPathAlias.php b/modules/tool_belt_content/src/ManualPathAlias.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e82729b622442a2361d5f04d0a22679f6e00e7f
+--- /dev/null
++++ b/modules/tool_belt_content/src/ManualPathAlias.php
+@@ -0,0 +1,244 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\tool_belt_content;
++
++use Drupal\Core\Entity\ContentEntityInterface;
++use Drupal\Core\Entity\EntityTypeManagerInterface;
++use Drupal\Core\Field\FieldItemInterface;
++use Drupal\path_alias\AliasRepositoryInterface;
++use Drupal\pathauto\PathautoState;
++
++/**
++ * Makes an alias set through a tool behave like one typed into the form.
++ *
++ * A new alias replaces the entity's existing alias instead of being added
++ * next to it, and pathauto must not overwrite it. Clearing the alias turns
++ * pathauto back on for the entity, so it generates a new alias if a pattern
++ * applies and removes the old one otherwise. Pathauto stores its state per
++ * entity, not per translation, so turning it on or off for one translation
++ * turns it on or off for all of them. The form has the same behavior.
++ *
++ * None of that can be done when the tool runs. The item may not have the
++ * existing alias ID, and pathauto's flag is a computed property that is lost
++ * when the entity is serialized into the tool handle tempstore. So the tool
++ * records the alias on the entity and this applies it on presave.
++ */
++final class ManualPathAlias {
++
++  /**
++   * The non-field entity value that holds the recorded aliases.
++   *
++   * Non-field values are serialized with the entity, so the record survives
++   * the tool handle store. Only the entity object changed by the tool has
++   * the record, so a save of the same entity loaded elsewhere is not
++   * affected.
++   */
++  private const PROPERTY = '_toolBeltManualPathAliases';
++
++  public function __construct(
++    private readonly EntityTypeManagerInterface $entityTypeManager,
++    private readonly ?AliasRepositoryInterface $aliasRepository = NULL,
++  ) {}
++
++  /**
++   * Adds the current alias ID to a value that clears the alias.
++   *
++   * NULL, an empty list and an item with an empty or NULL alias all count as
++   * a clear.
++   *
++   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
++   *   The entity translation the value is for.
++   * @param string $field_name
++   *   The name of the path field.
++   * @param mixed $value
++   *   The value passed to the tool.
++   *
++   * @return mixed
++   *   The value to set on the entity.
++   */
++  public function keepIdOnClear(ContentEntityInterface $entity, string $field_name, mixed $value): mixed {
++    if ($value === NULL || $value === []) {
++      $value = [['alias' => '']];
++    }
++    if (!is_array($value) || !isset($value[0]) || !is_array($value[0])) {
++      return $value;
++    }
++    if (trim((string) ($value[0]['alias'] ?? '')) !== '' || !empty($value[0]['pid'])) {
++      return $value;
++    }
++    $value[0]['alias'] = '';
++
++    // Without the ID the item is empty. FieldItemList::preSave() then filters
++    // it out before any hook runs, so the alias would never be removed.
++    $item = $entity->get($field_name)->first();
++    $current = $item ? $this->currentAlias($item, $entity) : NULL;
++    if ($current === NULL) {
++      return $value;
++    }
++    $value[0]['pid'] = $current['id'];
++    $value[0]['langcode'] = $current['langcode'];
++    return $value;
++  }
++
++  /**
++   * Records the alias a tool set on an entity, or that the tool cleared it.
++   *
++   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
++   *   The entity translation the alias was set on.
++   * @param string $field_name
++   *   The name of the path field.
++   */
++  public function record(ContentEntityInterface $entity, string $field_name): void {
++    // Translations share non-field values, so this is the record for all of
++    // them.
++    /** @var array<string, array<string, string>> $aliases */
++    $aliases = $entity->{self::PROPERTY} ?? [];
++    $langcode = $entity->language()->getId();
++
++    $item = $entity->get($field_name)->first();
++    if ($item === NULL || $item->isEmpty()) {
++      // An empty item is filtered out on save, so there is nothing to apply.
++      unset($aliases[$langcode][$field_name]);
++    }
++    else {
++      // PathItem::preSave() trims the alias before apply() compares it, so
++      // trim here too.
++      $aliases[$langcode][$field_name] = trim((string) $item->get('alias')->getValue());
++    }
++    if (($aliases[$langcode] ?? NULL) === []) {
++      unset($aliases[$langcode]);
++    }
++
++    if ($aliases === []) {
++      unset($entity->{self::PROPERTY});
++      return;
++    }
++    // PHPStan reads every magic entity property as a field.
++    // @phpstan-ignore assign.propertyType
++    $entity->{self::PROPERTY} = $aliases;
++  }
++
++  /**
++   * Applies the recorded aliases when the entity is saved.
++   *
++   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
++   *   The entity being saved.
++   */
++  public function apply(ContentEntityInterface $entity): void {
++    /** @var array<string, array<string, string>>|null $aliases */
++    $aliases = $entity->{self::PROPERTY} ?? NULL;
++    if ($aliases === NULL) {
++      return;
++    }
++    // The record only applies to the save that follows the tool call.
++    unset($entity->{self::PROPERTY});
++
++    // Core saves the path items of every translation, not just the one this
++    // hook received, so every translation in the record is checked. Pathauto
++    // only regenerates the active translation.
++    $active_langcode = $entity->language()->getId();
++    foreach ($aliases as $langcode => $fields) {
++      if (!$entity->hasTranslation($langcode)) {
++        continue;
++      }
++      $translation = $entity->getTranslation($langcode);
++
++      foreach ($fields as $field_name => $alias) {
++        if (!$translation->hasField($field_name)) {
++          continue;
++        }
++        foreach ($translation->get($field_name) as $item) {
++          // An alias that changed after the tool set it is saved as is.
++          if ($item->get('alias')->getValue() !== $alias) {
++            continue;
++          }
++          $this->applyToItem($item, $translation, $langcode === $active_langcode);
++        }
++      }
++    }
++  }
++
++  /**
++   * Sets the alias ID and the pathauto state on one item.
++   *
++   * @param \Drupal\Core\Field\FieldItemInterface $item
++   *   The path field item.
++   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
++   *   The entity translation being saved.
++   * @param bool $is_active
++   *   Whether that translation is the active one on the entity being saved.
++   */
++  private function applyToItem(FieldItemInterface $item, ContentEntityInterface $entity, bool $is_active): void {
++    // Pathauto is optional. instanceof does not autoload the class, so this
++    // works without it.
++    $pathauto = $item->getProperties(TRUE)['pathauto'] ?? NULL;
++    if (!$pathauto instanceof PathautoState) {
++      $pathauto = NULL;
++    }
++
++    if ((string) $item->get('alias')->getValue() === '') {
++      // The alias is deleted here instead of in PathItem::postSave(). That
++      // delete branch keeps the ID of the deleted alias on the item, and the
++      // next save of the same object fails on it. The alias is looked up
++      // again because the ID the tool stored may be outdated by now.
++      $current = $this->currentAlias($item, $entity);
++      if ($current !== NULL) {
++        $storage = $this->entityTypeManager->getStorage('path_alias');
++        $storage->delete(array_filter([$storage->load($current['id'])]));
++      }
++      $item->set('pid', NULL);
++
++      if ($pathauto === NULL) {
++        return;
++      }
++      if ($is_active) {
++        // Purging the stored state makes pathauto decide again on this save.
++        // With a matching pattern it generates a new alias.
++        $pathauto->purge();
++      }
++      else {
++        // Pathauto only regenerates the active translation, so for the others
++        // a clear just removes the alias.
++        $pathauto->setValue(PathautoState::SKIP);
++      }
++      return;
++    }
++
++    // Without the ID, PathItem::postSave() creates a second path_alias entity
++    // and keeps the old one. The item only has the ID if the entity was
++    // loaded after the alias was written. An entity pathauto aliased on its
++    // last save was not. The stored langcode is copied too, so the update
++    // does not change the alias language.
++    if (empty($item->get('pid')->getValue())) {
++      $current = $this->currentAlias($item, $entity);
++      if ($current !== NULL) {
++        $item->set('pid', $current['id']);
++        $item->set('langcode', $current['langcode']);
++      }
++    }
++    $pathauto?->setValue(PathautoState::SKIP);
++  }
++
++  /**
++   * Looks up the alias the entity has in the item's language.
++   *
++   * @param \Drupal\Core\Field\FieldItemInterface $item
++   *   The path field item.
++   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
++   *   The entity translation the item belongs to.
++   *
++   * @return array|null
++   *   The repository row ('id', 'path', 'alias', 'langcode'), or NULL if there
++   *   is none.
++   */
++  private function currentAlias(FieldItemInterface $item, ContentEntityInterface $entity): ?array {
++    if ($this->aliasRepository === NULL || $entity->isNew() || !$entity->hasLinkTemplate('canonical')) {
++      return NULL;
++    }
++    $langcode = $item->get('langcode')->getValue() ?: $item->getLangcode();
++    return $this->aliasRepository->lookupBySystemPath('/' . $entity->toUrl()->getInternalPath(), $langcode) ?: NULL;
++  }
++
++}
+diff --git a/modules/tool_belt_content/src/Plugin/tool/Tool/FieldSetValue.php b/modules/tool_belt_content/src/Plugin/tool/Tool/FieldSetValue.php
+index b647a01cd604ef488aa464215ccedc5e25a99bc3..f4c767f86763955c9f4b3abd256c57939f2a3694 100644
+--- a/modules/tool_belt_content/src/Plugin/tool/Tool/FieldSetValue.php
++++ b/modules/tool_belt_content/src/Plugin/tool/Tool/FieldSetValue.php
+@@ -21,7 +21,9 @@ use Drupal\tool\TypedData\InputDefinitionInterface;
+ use Drupal\tool\TypedData\InputDefinitionRefinerInterface;
+ use Drupal\tool\TypedData\ListInputDefinition;
+ use Drupal\tool\TypedData\MapInputDefinition;
++use Drupal\tool_belt_content\ManualPathAlias;
+ use Drupal\tool_belt_content\ViolationMessagesTrait;
++use Symfony\Component\DependencyInjection\ContainerInterface;
+ 
+ /**
+  * Plugin implementation of the field set value tool.
+@@ -69,6 +71,20 @@ final class FieldSetValue extends ToolBase implements InputDefinitionRefinerInte
+ 
+   use ViolationMessagesTrait;
+ 
++  /**
++   * Applies aliases set or cleared through this tool on save.
++   */
++  protected ManualPathAlias $manualPathAlias;
++
++  /**
++   * {@inheritdoc}
++   */
++  public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
++    $instance = parent::create($container, $configuration, $plugin_id, $plugin_definition);
++    $instance->manualPathAlias = $container->get(ManualPathAlias::class);
++    return $instance;
++  }
++
+   /**
+    * {@inheritdoc}
+    */
+@@ -88,6 +104,11 @@ final class FieldSetValue extends ToolBase implements InputDefinitionRefinerInte
+         $value = [$value];
+       }
+ 
++      $is_path_field = $entity->get($field_name)->getFieldDefinition()->getType() === 'path';
++      if ($is_path_field) {
++        $value = $this->manualPathAlias->keepIdOnClear($entity, $field_name, $value);
++      }
++
+       // Set the field value.
+       $entity->set($field_name, $value);
+ 
+@@ -99,6 +120,11 @@ final class FieldSetValue extends ToolBase implements InputDefinitionRefinerInte
+         ]));
+       }
+ 
++      // Recorded only after validation, so a failed call records nothing.
++      if ($is_path_field) {
++        $this->manualPathAlias->record($entity, $field_name);
++      }
++
+       return ExecutableResult::success($this->t('Successfully set field "@field" on @type entity.', [
+         '@field' => $field_name,
+         '@type' => $entity->getEntityTypeId(),
+diff --git a/modules/tool_belt_content/tests/src/Kernel/ManualPathAliasTest.php b/modules/tool_belt_content/tests/src/Kernel/ManualPathAliasTest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cdef6060053c322b8eb8e6a83a141bb23cc2f3a
+--- /dev/null
++++ b/modules/tool_belt_content/tests/src/Kernel/ManualPathAliasTest.php
+@@ -0,0 +1,246 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Tests\tool_belt_content\Kernel;
++
++use Drupal\language\Entity\ConfigurableLanguage;
++use Drupal\node\Entity\Node;
++use Drupal\node\NodeInterface;
++use Drupal\pathauto\Entity\PathautoPattern;
++use Drupal\pathauto\PathautoState;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
++
++/**
++ * Tests that pathauto does not replace an alias set through a tool.
++ *
++ * The entity passes through the tool handle store between the call that sets
++ * the alias and the call that saves it, which drops pathauto's own flag.
++ *
++ * @group tool_belt
++ */
++#[Group('tool_belt')]
++#[RunTestsInSeparateProcesses]
++class ManualPathAliasTest extends OneShotEntityToolTestBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected static $modules = ['path', 'path_alias', 'token', 'pathauto', 'language', 'content_translation'];
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setUp(): void {
++    parent::setUp();
++    $this->installEntitySchema('path_alias');
++    // Token's node tokens ask the date formatter for a format.
++    $this->installConfig(['system', 'pathauto']);
++    PathautoPattern::create([
++      'id' => 'node_title',
++      'type' => 'canonical_entities:node',
++      'pattern' => '/[node:title]',
++    ])->save();
++    ConfigurableLanguage::createFromLangcode('fr')->save();
++    $this->container->get('content_translation.manager')->setEnabled('node', 'page', TRUE);
++    $this->setUpCurrentUser([], ['access content', 'create page content', 'edit any page content']);
++  }
++
++  /**
++   * Follows one node through setting, keeping and clearing its alias.
++   *
++   * One method, because each step depends on the state the previous one
++   * leaves, and every kernel test method boots a new container.
++   */
++  public function testAliasLifecycle(): void {
++    $generated = $this->generated('Generated Title');
++
++    $node = Node::create(['type' => 'page', 'title' => 'Generated Title']);
++    $node = $this->setAliasAndSave($node, '/set-by-tool');
++    $this->assertAliases(['/set-by-tool'], $node, 'An alias set on a new entity is used instead of the pattern.');
++
++    $node = $this->setAliasAndSave($node, '');
++    $this->assertAliases([$generated], $node, 'Clearing an alias set by the tool turns pathauto back on.');
++
++    $node = $this->setAliasAndSave($node, '');
++    $this->assertAliases([$generated], $node, 'Clearing an alias generated by pathauto changes nothing.');
++
++    $this->setAlias($node, '/set-by-tool');
++    $node = $this->roundTrip($node);
++    $node->set('path', ['alias' => '/set-elsewhere']);
++    $node->save();
++    $this->assertAliases([$generated], $node, 'An alias changed after the tool ran goes through the ordinary save path, and pathauto regenerates its alias.');
++
++    // The translation steps run while pathauto still generates the alias,
++    // since a node with a tool-set alias gets none for a new translation.
++    $translation = $node->addTranslation('fr', ['title' => 'Titre Francais']);
++    $translation->save();
++    $this->assertAliases([$generated, $this->generated('Titre Francais')], $node, 'A new translation gets a generated alias.');
++
++    $this->setAlias($translation, '');
++    $node = $this->roundTrip($node);
++    $node->save();
++    $this->assertAliases([$generated], $node, 'Clearing a translation the save does not go through removes its alias.');
++
++    // Pathauto keeps one state per entity, so that clear turned it off for
++    // the English alias too, the same as the form would have. A fresh load,
++    // since the in-memory item still caches the state it computed earlier.
++    $storage = $this->container->get('entity_type.manager')->getStorage('node');
++    $storage->resetCache();
++    $node = $storage->load($node->id());
++    $node->setTitle('Renamed Title');
++    $node->save();
++    $this->assertAliases([$generated], $node, 'The English alias is no longer regenerated.');
++
++    $translation = $node->getTranslation('fr');
++    $translation->set('path', ['alias' => '/fr-by-hand']);
++    $translation->save();
++    $this->setAlias($translation, '/alias-francais');
++    $node = $this->roundTrip($node);
++    $node->save();
++    $this->assertAliases(['/alias-francais', $generated], $node, 'An alias set on a translation is updated in place when the save goes through another translation.');
++
++    $this->setAlias($node, '/set-by-tool');
++    $node = $this->roundTrip($node);
++    $storage->resetCache();
++    $storage->load($node->id())->save();
++    $node->save();
++    $this->assertAliases(['/alias-francais', '/set-by-tool'], $node, 'An alias set on a saved entity replaces the existing one, even when someone else saves the node in the meantime.');
++
++    $node->setTitle('Another Title');
++    $node->save();
++    $this->assertAliases(['/alias-francais', '/set-by-tool'], $node, 'A later save does not change a tool-set alias.');
++
++    // A fresh node, since its in-memory item has no alias ID: pathauto wrote
++    // the alias itself.
++    $other = Node::create(['type' => 'page', 'title' => 'Other Title']);
++    $other->save();
++    $this->assertAliases([$this->generated('Other Title')], $other, 'The second node gets a generated alias.');
++    PathautoPattern::load('node_title')->delete();
++    $other = $this->setAliasAndSave($other, '');
++    $this->assertAliases([], $other, 'Clearing removes the alias when no pattern applies.');
++  }
++
++  /**
++   * Tests that an alias set by the tool but never saved does not apply later.
++   */
++  public function testUnsavedAliasDoesNotOverrideLaterSave(): void {
++    $node = Node::create([
++      'type' => 'page',
++      'title' => 'Generated Title',
++      'path' => ['alias' => '/manual', 'pathauto' => PathautoState::SKIP],
++    ]);
++    $node->save();
++
++    // The tool sets the node's existing alias, and that entity is never
++    // saved.
++    $this->setAlias($node, '/manual');
++
++    $storage = $this->container->get('entity_type.manager')->getStorage('node');
++    $storage->resetCache();
++    $edited = $storage->load($node->id());
++    $edited->get('path')->first()->set('pathauto', PathautoState::CREATE);
++    $edited->save();
++    $this->assertAliases([$this->generated('Generated Title')], $edited, 'An editor who turns pathauto on gets a generated alias.');
++  }
++
++  /**
++   * Returns the alias pathauto generates for a title under the test pattern.
++   *
++   * @param string $title
++   *   The node title.
++   *
++   * @return string
++   *   The generated alias.
++   */
++  protected function generated(string $title): string {
++    return '/' . $this->container->get('pathauto.alias_cleaner')->cleanString($title);
++  }
++
++  /**
++   * Asserts the aliases stored for a node.
++   *
++   * @param string[] $expected
++   *   The expected aliases, sorted.
++   * @param \Drupal\node\NodeInterface $node
++   *   The node.
++   * @param string $step
++   *   What the step was meant to show.
++   */
++  protected function assertAliases(array $expected, NodeInterface $node, string $step): void {
++    $this->assertSame($expected, $this->loadAliases($node), $step);
++  }
++
++  /**
++   * Sets an alias through the tool.
++   *
++   * @param \Drupal\node\NodeInterface $node
++   *   The node, or one of its translations.
++   * @param string $alias
++   *   The alias to set; an empty string clears it.
++   */
++  protected function setAlias(NodeInterface $node, string $alias): void {
++    $result = $this->runTool('tool_belt:field_set_value', [
++      'entity' => $node,
++      'field_name' => 'path',
++      'value' => [['alias' => $alias]],
++    ]);
++    $this->assertTrue($result->isSuccess(), (string) $result->getMessage());
++  }
++
++  /**
++   * Sets an alias through the tool and saves the node as the next call would.
++   *
++   * @param \Drupal\node\NodeInterface $node
++   *   The node.
++   * @param string $alias
++   *   The alias to set; an empty string clears it.
++   *
++   * @return \Drupal\node\NodeInterface
++   *   The node after the round trip through the handle store and the save.
++   */
++  protected function setAliasAndSave(NodeInterface $node, string $alias): NodeInterface {
++    $this->setAlias($node, $alias);
++    $node = $this->roundTrip($node);
++    $node->save();
++    return $node;
++  }
++
++  /**
++   * Stores a node in the tool handle store and reads it back.
++   *
++   * @param \Drupal\node\NodeInterface $node
++   *   The node to pass through the store.
++   *
++   * @return \Drupal\node\NodeInterface
++   *   The node as the next tool call would receive it.
++   */
++  protected function roundTrip(NodeInterface $node): NodeInterface {
++    $handle_store = $this->container->get('tool.handle_store');
++    $node = $handle_store->resolve($handle_store->store($node));
++    $this->assertInstanceOf(NodeInterface::class, $node);
++    return $node;
++  }
++
++  /**
++   * Returns the aliases stored for a node, sorted.
++   *
++   * @param \Drupal\node\NodeInterface $node
++   *   The node.
++   *
++   * @return string[]
++   *   The aliases pointing at the node.
++   */
++  protected function loadAliases(NodeInterface $node): array {
++    $storage = $this->container->get('entity_type.manager')->getStorage('path_alias');
++    $storage->resetCache();
++    $aliases = [];
++    foreach ($storage->loadByProperties(['path' => '/node/' . $node->id()]) as $path_alias) {
++      $aliases[] = $path_alias->getAlias();
++    }
++    sort($aliases);
++    return $aliases;
++  }
++
++}
+diff --git a/modules/tool_belt_content/tests/src/Kernel/PathAliasTest.php b/modules/tool_belt_content/tests/src/Kernel/PathAliasTest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..e52ebc61009ebdf2c2b8f655d2fde78c29bb6dcb
+--- /dev/null
++++ b/modules/tool_belt_content/tests/src/Kernel/PathAliasTest.php
+@@ -0,0 +1,119 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Drupal\Tests\tool_belt_content\Kernel;
++
++use Drupal\language\Entity\ConfigurableLanguage;
++use Drupal\node\Entity\Node;
++use Drupal\path_alias\Entity\PathAlias;
++use PHPUnit\Framework\Attributes\Group;
++use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
++
++/**
++ * Tests how the set field value tool handles path aliases without pathauto.
++ *
++ * @group tool_belt
++ */
++#[Group('tool_belt')]
++#[RunTestsInSeparateProcesses]
++class PathAliasTest extends OneShotEntityToolTestBase {
++
++  /**
++   * {@inheritdoc}
++   */
++  protected static $modules = ['path', 'path_alias', 'language'];
++
++  /**
++   * {@inheritdoc}
++   */
++  protected function setUp(): void {
++    parent::setUp();
++    $this->installEntitySchema('path_alias');
++    ConfigurableLanguage::createFromLangcode('fr')->save();
++    $this->setUpCurrentUser([], ['access content', 'create page content', 'edit any page content']);
++  }
++
++  /**
++   * Follows one node through setting, updating and clearing its alias.
++   *
++   * One method, because each step depends on the state the previous one
++   * leaves, and every kernel test method boots a new container.
++   */
++  public function testAliasLifecycle(): void {
++    $node = Node::create(['type' => 'page', 'title' => 'Bonjour']);
++    $node->save();
++    $this->setPath($node, [['alias' => '/bonjour']]);
++    $node->set('langcode', 'fr');
++    $node->save();
++    $this->assertSame(['/bonjour' => 'fr'], $this->loadAliases($node), 'A first alias takes the language the entity has when it is saved, not when the tool ran.');
++
++    $this->setPath($node, [['alias' => '/second-alias']]);
++    $node->save();
++    $this->assertSame(['/second-alias' => 'fr'], $this->loadAliases($node), 'Setting an alias again updates it instead of adding another one.');
++
++    $this->setPath($node, [['alias' => '/third-alias', 'pid' => NULL, 'langcode' => NULL]]);
++    $node->save();
++    $this->assertSame(['/third-alias' => 'fr'], $this->loadAliases($node), 'A path ID the caller sent as NULL still updates the alias in place.');
++
++    $this->setPath($node, [['alias' => NULL]]);
++    $node->save();
++    $this->assertSame([], $this->loadAliases($node), 'A NULL alias removes the alias.');
++
++    $this->setPath($node, [['alias' => '/fourth-alias']]);
++    $node->save();
++    $this->setPath($node, []);
++    $node->save();
++    $this->assertSame([], $this->loadAliases($node), 'An empty value removes the alias.');
++
++    $this->setPath($node, [['alias' => '/fifth-alias']]);
++    $node->save();
++    $spare = PathAlias::create([
++      'path' => '/node/' . $node->id(),
++      'alias' => '/spare-alias',
++      'langcode' => 'fr',
++    ]);
++    $spare->save();
++    $this->setPath($node, [['alias' => '/updated-spare', 'pid' => (int) $spare->id()]]);
++    $node->save();
++    $this->assertSame(['/fifth-alias' => 'fr', '/updated-spare' => 'fr'], $this->loadAliases($node), 'A path ID passed by the caller is used as is, so the other alias is not changed.');
++  }
++
++  /**
++   * Sets the path field through the tool.
++   *
++   * @param \Drupal\node\Entity\Node $node
++   *   The node.
++   * @param array $value
++   *   The value to pass to the tool.
++   */
++  protected function setPath(Node $node, array $value): void {
++    $result = $this->runTool('tool_belt:field_set_value', [
++      'entity' => $node,
++      'field_name' => 'path',
++      'value' => $value,
++    ]);
++    $this->assertTrue($result->isSuccess(), (string) $result->getMessage());
++  }
++
++  /**
++   * Returns the aliases stored for a node, with their language, sorted.
++   *
++   * @param \Drupal\node\Entity\Node $node
++   *   The node.
++   *
++   * @return string[]
++   *   Langcodes keyed by alias.
++   */
++  protected function loadAliases(Node $node): array {
++    $storage = $this->container->get('entity_type.manager')->getStorage('path_alias');
++    $storage->resetCache();
++    $aliases = [];
++    foreach ($storage->loadByProperties(['path' => '/node/' . $node->id()]) as $path_alias) {
++      $aliases[$path_alias->getAlias()] = $path_alias->language()->getId();
++    }
++    ksort($aliases);
++    return $aliases;
++  }
++
++}
+diff --git a/modules/tool_belt_content/tool_belt_content.module b/modules/tool_belt_content/tool_belt_content.module
+new file mode 100644
+index 0000000000000000000000000000000000000000..d047c77cf492dede1619676bf876b06e726ba80e
+--- /dev/null
++++ b/modules/tool_belt_content/tool_belt_content.module
+@@ -0,0 +1,20 @@
++<?php
++
++/**
++ * @file
++ * Provides tools for creating, editing and deleting content entities.
++ */
++
++declare(strict_types=1);
++
++use Drupal\Core\Entity\EntityInterface;
++use Drupal\Core\Hook\Attribute\LegacyHook;
++use Drupal\tool_belt_content\Hook\ManualPathAliasHooks;
++
++/**
++ * Implements hook_entity_presave().
++ */
++#[LegacyHook]
++function tool_belt_content_entity_presave(EntityInterface $entity): void {
++  \Drupal::service(ManualPathAliasHooks::class)->entityPresave($entity);
++}
+diff --git a/modules/tool_belt_content/tool_belt_content.services.yml b/modules/tool_belt_content/tool_belt_content.services.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..9cf382dcb3684ed9aec8f6be10157b92172332b5
+--- /dev/null
++++ b/modules/tool_belt_content/tool_belt_content.services.yml
+@@ -0,0 +1,7 @@
++services:
++  _defaults:
++    autoconfigure: true
++    autowire: true
++
++  Drupal\tool_belt_content\ManualPathAlias: ~
++  Drupal\tool_belt_content\Hook\ManualPathAliasHooks: ~

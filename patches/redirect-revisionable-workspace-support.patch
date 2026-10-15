@@ -1,0 +1,819 @@
+redirect #3313540 (MR !138 at 2ce2eb4821), against 8.x-1.x.
+diff --git a/redirect.post_update.php b/redirect.post_update.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee623b078dd2eb0c4fa3c0cac36c7b2e4aae424e
+--- /dev/null
++++ b/redirect.post_update.php
+@@ -0,0 +1,134 @@
++<?php
++
++/**
++ * @file
++ * Post update functions for Redirect.
++ */
++
++use Drupal\Core\Field\BaseFieldDefinition;
++use Drupal\Core\StringTranslation\TranslatableMarkup;
++
++/**
++ * Add the revision metadata fields to 'redirect' entities.
++ */
++function redirect_post_update_add_revision_metadata_fields(): TranslatableMarkup {
++  // We are adding these fields before the conversion to revisionable in order
++  // to be able to use initial values from the existing 'created' and 'uid'
++  // fields.
++  $definition_update_manager = \Drupal::entityDefinitionUpdateManager();
++  $entity_type = $definition_update_manager->getEntityType('redirect');
++
++  // Add the revision metadata keys to the redirect entity type. Keys that are
++  // already installed are kept, for example 'workspace' on a site where
++  // redirects are already revisionable and Workspaces is installed.
++  $installed_keys = $entity_type->get('revision_metadata_keys') ?? [];
++  $revision_metadata_keys = $installed_keys + [
++    'revision_default' => 'revision_default',
++    'revision_user' => 'revision_uid',
++    'revision_created' => 'revision_created',
++    'revision_log_message' => 'revision_log',
++  ];
++  if ($revision_metadata_keys !== $installed_keys) {
++    $entity_type->set('revision_metadata_keys', $revision_metadata_keys);
++    $definition_update_manager->updateEntityType($entity_type);
++  }
++
++  // Sites might already have these fields installed if they ran a previous
++  // version of this update function.
++  if (!$definition_update_manager->getFieldStorageDefinition('revision_created', 'redirect')) {
++    $revision_created = BaseFieldDefinition::create('created')
++      ->setLabel(new TranslatableMarkup('Revision create time'))
++      ->setDescription(new TranslatableMarkup('The time that the current revision was created.'))
++      ->setRevisionable(TRUE)
++      ->setInitialValueFromField('created');
++    $definition_update_manager->installFieldStorageDefinition('revision_created', 'redirect', 'redirect', $revision_created);
++  }
++
++  if (!$definition_update_manager->getFieldStorageDefinition('revision_uid', 'redirect')) {
++    $revision_user = BaseFieldDefinition::create('entity_reference')
++      ->setLabel(new TranslatableMarkup('Revision user'))
++      ->setDescription(new TranslatableMarkup('The user ID of the author of the current revision.'))
++      ->setSetting('target_type', 'user')
++      ->setRevisionable(TRUE)
++      ->setInitialValueFromField('uid');
++    $definition_update_manager->installFieldStorageDefinition('revision_uid', 'redirect', 'redirect', $revision_user);
++  }
++
++  if (!$definition_update_manager->getFieldStorageDefinition('revision_log', 'redirect')) {
++    $revision_log_message = BaseFieldDefinition::create('string_long')
++      ->setLabel(new TranslatableMarkup('Revision log message'))
++      ->setDescription(new TranslatableMarkup('Briefly describe the changes you have made.'))
++      ->setRevisionable(TRUE)
++      ->setDefaultValue('');
++    $definition_update_manager->installFieldStorageDefinition('revision_log', 'redirect', 'redirect', $revision_log_message);
++  }
++
++  return new TranslatableMarkup('The revision metadata fields have been added to redirects.');
++}
++
++/**
++ * Convert 'redirect' entities to revisionable.
++ */
++function redirect_post_update_make_redirect_revisionable(&$sandbox): ?TranslatableMarkup {
++  $entity_type_id = 'redirect';
++  $definition_update_manager = \Drupal::entityDefinitionUpdateManager();
++  /** @var \Drupal\Core\Entity\EntityLastInstalledSchemaRepositoryInterface $last_installed_schema_repository */
++  $last_installed_schema_repository = \Drupal::service('entity.last_installed_schema.repository');
++
++  $entity_type = $definition_update_manager->getEntityType($entity_type_id);
++  $field_storage_definitions = $last_installed_schema_repository->getLastInstalledFieldStorageDefinitions($entity_type_id);
++
++  // Update the entity type definition.
++  $entity_keys = $entity_type->getKeys();
++  $entity_keys['revision'] = 'revision_id';
++  $entity_type->set('entity_keys', $entity_keys);
++  $entity_type->set('revision_table', 'redirect_revision');
++
++  // Add the new fields required by a revisionable entity type.
++  $field_storage_definitions['revision_id'] = BaseFieldDefinition::create('integer')
++    ->setName('revision_id')
++    ->setTargetEntityTypeId($entity_type_id)
++    ->setTargetBundle(NULL)
++    ->setLabel(new TranslatableMarkup('Revision ID'))
++    ->setReadOnly(TRUE)
++    ->setSetting('unsigned', TRUE);
++
++  $field_storage_definitions['revision_default'] = BaseFieldDefinition::create('boolean')
++    ->setName('revision_default')
++    ->setTargetEntityTypeId($entity_type_id)
++    ->setTargetBundle(NULL)
++    ->setLabel(new TranslatableMarkup('Default revision'))
++    ->setDescription(new TranslatableMarkup('A flag indicating whether this was a default revision when it was saved.'))
++    ->setStorageRequired(TRUE)
++    ->setInternal(TRUE)
++    ->setTranslatable(FALSE)
++    ->setRevisionable(TRUE);
++
++  // Update current fields to be revisionable.
++  /** @var \Drupal\Core\Field\BaseFieldDefinition[] $field_storage_definitions */
++  $field_storage_definitions['hash']->setRevisionable(TRUE);
++  $field_storage_definitions['uid']->setRevisionable(TRUE);
++  $field_storage_definitions['redirect_source']->setRevisionable(TRUE);
++  $field_storage_definitions['redirect_redirect']->setRevisionable(TRUE);
++  $field_storage_definitions['status_code']->setRevisionable(TRUE);
++  $field_storage_definitions['language']->setRevisionable(TRUE);
++  $field_storage_definitions['created']->setRevisionable(TRUE);
++
++  // The ID field has been updated to be unsigned. We need to instantiate a new
++  // definition object so the 'schema' property can be re-created.
++  $field_storage_definitions['rid'] = BaseFieldDefinition::create('integer')
++    ->setName('rid')
++    ->setTargetEntityTypeId($entity_type_id)
++    ->setTargetBundle(NULL)
++    ->setLabel(new TranslatableMarkup('ID'))
++    ->setReadOnly(TRUE)
++    ->setSetting('unsigned', TRUE);
++
++  $definition_update_manager->updateFieldableEntityType($entity_type, $field_storage_definitions, $sandbox);
++
++  if (isset($sandbox['#finished']) && $sandbox['#finished'] === 1) {
++    return new TranslatableMarkup('Redirect entities have been converted to revisionable.');
++  }
++
++  return NULL;
++}
+diff --git a/redirect.services.yml b/redirect.services.yml
+index cb025c00fd8f724c46a28f8024e8ed4c2efdb858..a73364ed1b4edb17c70daa11dbe3caaf45c9915b 100644
+--- a/redirect.services.yml
++++ b/redirect.services.yml
+@@ -7,7 +7,7 @@ services:
+   Drupal\redirect\RedirectPrefixList: '@redirect.prefix_list'
+   redirect.repository:
+     class: Drupal\redirect\RedirectRepository
+-    arguments: ['@entity_type.manager', '@database', '@config.factory', '@request_stack', '@redirect.prefix_list']
++    arguments: ['@entity_type.manager', '@database', '@config.factory', '@request_stack', '@redirect.prefix_list', '@?workspaces.manager', '@?workspaces.information', '@?workspaces.tracker']
+     tags:
+       - { name: backend_overridable }
+   Drupal\redirect\RedirectRepository: '@redirect.repository'
+diff --git a/src/Entity/Redirect.php b/src/Entity/Redirect.php
+index 2cdd0edd40e7a2e968037c2dbe19544ff80a80a3..a5de583503dae5ae69c03280398537f94c2edfad 100644
+--- a/src/Entity/Redirect.php
++++ b/src/Entity/Redirect.php
+@@ -11,6 +11,8 @@ use Drupal\Core\Entity\EntityPublishedInterface;
+ use Drupal\Core\Entity\EntityPublishedTrait;
+ use Drupal\Core\Entity\EntityStorageInterface;
+ use Drupal\Core\Entity\EntityTypeInterface;
++use Drupal\Core\Entity\RevisionLogEntityTrait;
++use Drupal\Core\Entity\RevisionLogInterface;
+ use Drupal\Core\Field\BaseFieldDefinition;
+ use Drupal\Core\StringTranslation\TranslatableMarkup;
+ use Drupal\link\LinkItemInterface;
+@@ -38,16 +40,23 @@ use Drupal\redirect\RedirectViewsData;
+  *     "storage_schema" = "\Drupal\redirect\RedirectStorageSchema"
+  *   },
+  *   base_table = "redirect",
++ *   revision_table = "redirect_revision",
+  *   translatable = FALSE,
+  *   admin_permission = "administer redirects",
+  *   entity_keys = {
+  *     "id" = "rid",
++ *     "revision" = "revision_id",
+  *     "label" = "redirect_source",
+  *     "uuid" = "uuid",
+  *     "bundle" = "type",
+  *     "langcode" = "language",
+  *     "published" = "enabled",
+  *   },
++ *   revision_metadata_keys = {
++ *     "revision_user" = "revision_uid",
++ *     "revision_created" = "revision_created",
++ *     "revision_log_message" = "revision_log"
++ *   },
+  *   links = {
+  *     "canonical" = "/admin/config/search/redirect/edit/{redirect}",
+  *     "delete-form" = "/admin/config/search/redirect/delete/{redirect}",
+@@ -63,6 +72,7 @@ use Drupal\redirect\RedirectViewsData;
+   label: new TranslatableMarkup('Redirect'),
+   entity_keys: [
+     'id' => 'rid',
++    'revision' => 'revision_id',
+     'label' => 'redirect_source',
+     'uuid' => 'uuid',
+     'bundle' => 'type',
+@@ -87,14 +97,21 @@ use Drupal\redirect\RedirectViewsData;
+   admin_permission: 'administer redirects',
+   bundle_label: new TranslatableMarkup('Redirect type'),
+   base_table: 'redirect',
++  revision_table: 'redirect_revision',
+   translatable: FALSE,
++  revision_metadata_keys: [
++    'revision_user' => 'revision_uid',
++    'revision_created' => 'revision_created',
++    'revision_log_message' => 'revision_log',
++  ],
+   constraints: [
+     'RedirectUniqueHash' => [],
+   ]
+ )]
+-class Redirect extends ContentEntityBase implements EntityPublishedInterface {
++class Redirect extends ContentEntityBase implements EntityPublishedInterface, RevisionLogInterface {
+ 
+   use EntityPublishedTrait;
++  use RevisionLogEntityTrait;
+ 
+   /**
+    * Generates a unique hash for identification purposes.
+@@ -379,31 +396,27 @@ class Redirect extends ContentEntityBase implements EntityPublishedInterface {
+    * {@inheritdoc}
+    */
+   public static function baseFieldDefinitions(EntityTypeInterface $entity_type) {
+-    $fields = [];
++    $fields = parent::baseFieldDefinitions($entity_type);
+     $fields += static::publishedBaseFieldDefinitions($entity_type);
++    $fields += static::revisionLogBaseFieldDefinitions($entity_type);
+ 
+-    $fields['rid'] = BaseFieldDefinition::create('integer')
+-      ->setLabel(t('Redirect ID'))
+-      ->setDescription(t('The redirect ID.'))
+-      ->setReadOnly(TRUE);
++    /** @var \Drupal\Core\Field\BaseFieldDefinition[] $fields */
++    $fields['type']->setLabel(t('Type'))
++      ->setDescription(t('The redirect type.'));
+ 
+-    $fields['uuid'] = BaseFieldDefinition::create('uuid')
+-      ->setLabel(t('UUID'))
+-      ->setDescription(t('The record UUID.'))
+-      ->setReadOnly(TRUE);
++    // Hide the revision log field by default.
++    $fields['revision_log']->setDisplayOptions('form', []);
+ 
+     $fields['hash'] = BaseFieldDefinition::create('string')
+       ->setLabel(t('Hash'))
+       ->setSetting('max_length', 64)
+-      ->setDescription(t('The redirect hash.'));
+-
+-    $fields['type'] = BaseFieldDefinition::create('string')
+-      ->setLabel(t('Type'))
+-      ->setDescription(t('The redirect type.'));
++      ->setDescription(t('The redirect hash.'))
++      ->setRevisionable(TRUE);
+ 
+     $fields['uid'] = BaseFieldDefinition::create('entity_reference')
+       ->setLabel(t('User ID'))
+-      ->setDescription(t('The user ID of the node author.'))
++      ->setDescription(t('The user ID of the redirect author.'))
++      ->setRevisionable(TRUE)
+       ->setDefaultValueCallback('\Drupal\redirect\Entity\Redirect::getCurrentUserId')
+       ->setSettings([
+         'target_type' => 'user',
+@@ -417,6 +430,7 @@ class Redirect extends ContentEntityBase implements EntityPublishedInterface {
+         '%anchor' => '#anchor',
+       ]))
+       ->setRequired(TRUE)
++      ->setRevisionable(TRUE)
+       ->setTranslatable(FALSE)
+       ->setDisplayOptions('form', [
+         'type' => 'redirect_link',
+@@ -427,6 +441,7 @@ class Redirect extends ContentEntityBase implements EntityPublishedInterface {
+     $fields['redirect_redirect'] = BaseFieldDefinition::create('link')
+       ->setLabel(t('To'))
+       ->setRequired(TRUE)
++      ->setRevisionable(TRUE)
+       ->setTranslatable(FALSE)
+       ->setSettings([
+         'link_type' => LinkItemInterface::LINK_GENERIC,
+@@ -438,22 +453,16 @@ class Redirect extends ContentEntityBase implements EntityPublishedInterface {
+       ])
+       ->setDisplayConfigurable('form', TRUE);
+ 
+-    $fields['language'] = BaseFieldDefinition::create('language')
+-      ->setLabel(t('Language'))
+-      ->setDescription(t('The redirect language.'))
+-      ->setDisplayOptions('form', [
+-        'type' => 'language_select',
+-        'weight' => 2,
+-      ]);
+-
+     $fields['status_code'] = BaseFieldDefinition::create('integer')
+       ->setLabel(t('Status code'))
+       ->setDescription(t('The redirect status code.'))
+-      ->setDefaultValue(0);
++      ->setDefaultValue(0)
++      ->setRevisionable(TRUE);
+ 
+     $fields['created'] = BaseFieldDefinition::create('created')
+       ->setLabel(t('Created'))
+-      ->setDescription(t('The date when the redirect was created.'));
++      ->setDescription(t('The date when the redirect was created.'))
++      ->setRevisionable(TRUE);
+ 
+     // Use a more appropriate label for redirect status.
+     $fields['enabled']
+diff --git a/src/Hook/RedirectEntityHooks.php b/src/Hook/RedirectEntityHooks.php
+index 69c1c7b781baf0bbc34b0fb9c693d314d92570b4..78b6a628876d243bfb100ede5b553c470a429bb0 100644
+--- a/src/Hook/RedirectEntityHooks.php
++++ b/src/Hook/RedirectEntityHooks.php
+@@ -66,11 +66,16 @@ class RedirectEntityHooks {
+     // Create redirect from the old path alias to the new one.
+     if ($original_path_alias->getAlias() != $path_alias->getAlias()) {
+       if (!$this->redirectRepository->findMatchingRedirect($original_path_alias->getAlias(), [], $original_path_alias->language()->getId())) {
+-        $redirect = Redirect::create();
++        // A redirect created in another workspace shows as disabled here until
++        // that workspace is published, but it holds the hash a new redirect
++        // would need, so it is reused. The other workspace keeps its own
++        // revision.
++        $redirect = $this->redirectRepository->findCreatedInOtherWorkspace($original_path_alias->getAlias(), [], $original_path_alias->language()->getId()) ?? Redirect::create();
+         $redirect->setSource($original_path_alias->getAlias());
+         $redirect->setRedirect($path_alias->getPath());
+         $redirect->setLanguage($original_path_alias->language()->getId());
+         $redirect->setStatusCode($config->get('default_status_code'));
++        $redirect->setPublished();
+         $redirect->save();
+       }
+     }
+diff --git a/src/RedirectRepository.php b/src/RedirectRepository.php
+index f45ab917d2095a6f53522c52ee6e3cea8dd344e1..afca71063fdfbee958136f94efdc3d827e42e67a 100644
+--- a/src/RedirectRepository.php
++++ b/src/RedirectRepository.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\redirect;
+ 
++use Drupal\Component\Utility\DeprecationHelper;
+ use Drupal\Core\Cache\CacheableMetadata;
+ use Drupal\Core\Config\ConfigFactoryInterface;
+ use Drupal\Core\Database\Connection;
+@@ -9,6 +10,9 @@ use Drupal\Core\Entity\EntityTypeManagerInterface;
+ use Drupal\Core\Language\Language;
+ use Drupal\redirect\Entity\Redirect;
+ use Drupal\redirect\Exception\RedirectLoopException;
++use Drupal\workspaces\WorkspaceInformationInterface;
++use Drupal\workspaces\WorkspaceManagerInterface;
++use Drupal\workspaces\WorkspaceTrackerInterface;
+ use Symfony\Component\HttpFoundation\RequestStack;
+ 
+ /**
+@@ -31,6 +35,21 @@ class RedirectRepository {
+    */
+   protected $config;
+ 
++  /**
++   * The workspace manager, if the module is installed.
++   */
++  protected ?WorkspaceManagerInterface $workspaceManager;
++
++  /**
++   * The workspace information service, if the module is installed.
++   */
++  protected ?WorkspaceInformationInterface $workspaceInformation;
++
++  /**
++   * The workspace tracker, if the module is installed on core 11.3 or later.
++   */
++  protected ?WorkspaceTrackerInterface $workspaceTracker;
++
+   /**
+    * An array of found redirect IDs to avoid recursion.
+    *
+@@ -61,8 +80,14 @@ class RedirectRepository {
+    *   The request stack.
+    * @param \Drupal\redirect\RedirectPrefixList|null $prefix_list
+    *   The prefix list service.
++   * @param \Drupal\workspaces\WorkspaceManagerInterface|null $workspace_manager
++   *   The workspace manager.
++   * @param \Drupal\workspaces\WorkspaceInformationInterface|null $workspace_information
++   *   The workspace information service.
++   * @param \Drupal\workspaces\WorkspaceTrackerInterface|null $workspace_tracker
++   *   The workspace tracker.
+    */
+-  public function __construct(EntityTypeManagerInterface $manager, Connection $connection, ConfigFactoryInterface $config_factory, ?RequestStack $request_stack = NULL, ?RedirectPrefixList $prefix_list = NULL) {
++  public function __construct(EntityTypeManagerInterface $manager, Connection $connection, ConfigFactoryInterface $config_factory, ?RequestStack $request_stack = NULL, ?RedirectPrefixList $prefix_list = NULL, ?WorkspaceManagerInterface $workspace_manager = NULL, ?WorkspaceInformationInterface $workspace_information = NULL, ?WorkspaceTrackerInterface $workspace_tracker = NULL) {
+     $this->manager = $manager;
+     $this->connection = $connection;
+     $this->config = $config_factory->get('redirect.settings');
+@@ -78,6 +103,9 @@ class RedirectRepository {
+       $prefix_list = \Drupal::service('redirect.prefix_list');
+     }
+     $this->prefixList = $prefix_list;
++    $this->workspaceManager = $workspace_manager;
++    $this->workspaceInformation = $workspace_information;
++    $this->workspaceTracker = $workspace_tracker;
+   }
+ 
+   /**
+@@ -122,9 +150,8 @@ class RedirectRepository {
+       }
+     }
+ 
+-    // Load redirects by hash. A direct query is used to improve performance.
+     try {
+-      $rid = $this->connection->query('SELECT rid FROM {redirect} WHERE hash IN (:hashes[]) AND enabled = 1 ORDER BY LENGTH(redirect_source__query) DESC', [':hashes[]' => $hashes])->fetchField();
++      $rid = $this->findByHash($hashes);
+     }
+     catch (\Exception) {
+       // Return early in case the query failed. This can only happen if the
+@@ -164,6 +191,43 @@ class RedirectRepository {
+     return NULL;
+   }
+ 
++  /**
++   * Helper function to find a redirect given a list of hashes.
++   *
++   * @param array $hashes
++   *   An array of redirect hashes.
++   *
++   * @return ?int
++   *   A redirect ID or NULL if none was found.
++   */
++  protected function findByHash(array $hashes): ?int {
++    if ($this->workspaceManager?->hasActiveWorkspace()) {
++      // Load redirects by hash using an aggregated entity query.
++      $results = $this->manager->getStorage('redirect')->getAggregateQuery()
++        ->accessCheck(FALSE)
++        ->condition('hash', $hashes, 'IN')
++        ->condition('enabled', 1)
++        ->groupBy('rid')
++        ->groupBy('redirect_source.query')
++        ->execute();
++
++      // Sort by query length (descending) in PHP.
++      if ($results) {
++        usort($results, fn($a, $b) =>
++          strlen($b['redirect_source__query'] ?? '') <=> strlen($a['redirect_source__query'] ?? '')
++        );
++        $rid = $results[0]['rid'];
++      }
++    }
++    else {
++      // Load redirects by hash. A direct query is used to improve performance.
++      $rid = $this->connection->query('SELECT rid FROM {redirect} WHERE hash IN (:hashes[]) AND enabled = 1 ORDER BY LENGTH(redirect_source__query) DESC', [':hashes[]' => $hashes])
++        ->fetchField();
++    }
++
++    return !empty($rid) ? (int) $rid : NULL;
++  }
++
+   /**
+    * Helper function to find recursive redirects.
+    *
+@@ -227,6 +291,78 @@ class RedirectRepository {
+     return $storage->loadMultiple($ids);
+   }
+ 
++  /**
++   * Finds a redirect from a source that was created in another workspace.
++   *
++   * A redirect created in a workspace is unpublished everywhere else until
++   * that workspace is published, but it still holds its hash, so a new
++   * redirect with the same source, query and language would fail on the
++   * unique key. This is not meant for request-time lookups, use
++   * ::findMatchingRedirect() for those.
++   *
++   * @param string $source_path
++   *   The redirect source path.
++   * @param array $query
++   *   (optional) The redirect source query.
++   * @param string $language
++   *   (optional) The language code.
++   *
++   * @return \Drupal\redirect\Entity\Redirect|null
++   *   The redirect entity, or NULL if there is none.
++   */
++  public function findCreatedInOtherWorkspace(string $source_path, array $query = [], string $language = Language::LANGCODE_NOT_SPECIFIED): ?Redirect {
++    if (!$this->workspaceManager || !$this->workspaceInformation) {
++      return NULL;
++    }
++
++    $storage = $this->manager->getStorage('redirect');
++    $ids = $storage->getQuery()
++      ->accessCheck(FALSE)
++      ->condition('hash', Redirect::generateHash($source_path, $query, $language))
++      ->execute();
++    foreach ($ids ? $storage->loadMultiple($ids) : [] as $redirect) {
++      if ($this->isCreatedInOtherWorkspace($redirect)) {
++        return $redirect;
++      }
++    }
++    return NULL;
++  }
++
++  /**
++   * Checks whether a redirect was created in a workspace other than this one.
++   *
++   * @param \Drupal\redirect\Entity\Redirect $redirect
++   *   The redirect, as loaded in Live or in the active workspace.
++   *
++   * @return bool
++   *   TRUE if the redirect is unpublished here and was created in another
++   *   workspace, FALSE otherwise.
++   */
++  protected function isCreatedInOtherWorkspace(Redirect $redirect): bool {
++    if ($redirect->isPublished()) {
++      return FALSE;
++    }
++
++    $tracking_workspace_ids = DeprecationHelper::backwardsCompatibleCall(
++      \Drupal::VERSION,
++      '11.3.0',
++      fn () => $this->workspaceTracker->getEntityTrackingWorkspaceIds($redirect),
++      // @phpstan-ignore globalDrupalDependencyInjection.useDependencyInjection, staticServiceDeprecatedService.deprecated
++      fn () => \Drupal::service('workspaces.association')->getEntityTrackingWorkspaceIds($redirect),
++    );
++    $active_workspace_id = $this->workspaceManager->hasActiveWorkspace() ? $this->workspaceManager->getActiveWorkspace()->id() : NULL;
++    $workspace_ids = array_diff($tracking_workspace_ids, [$active_workspace_id]);
++    if (!$workspace_ids) {
++      return FALSE;
++    }
++    foreach ($this->manager->getStorage('workspace')->loadMultiple($workspace_ids) as $workspace) {
++      if ($this->workspaceInformation->isEntityDeletable($redirect, $workspace)) {
++        return TRUE;
++      }
++    }
++    return FALSE;
++  }
++
+   /**
+    * Load redirect entity by id.
+    *
+@@ -272,27 +408,28 @@ class RedirectRepository {
+    */
+   public function deleteByPath(string $path, ?string $langcode = NULL, bool $match_subpaths_and_redirect = TRUE): void {
+     $path = ltrim($path, '/');
+-    $query = $this->connection->select('redirect');
+-    $query->addField('redirect', 'rid');
+-    $query_or = $this->connection->condition('OR');
+-    $query_or->condition('redirect_source__path', $this->connection->escapeLike($path), 'LIKE');
++
++    $storage = $this->manager->getStorage('redirect');
++    $query = $storage->getQuery()
++      ->accessCheck(FALSE);
++
++    $or_group = $query->orConditionGroup()
++      ->condition('redirect_source.path', $path, '=');
+     if ($match_subpaths_and_redirect) {
+-      $query_or->condition('redirect_source__path', $this->connection->escapeLike($path . '/') . '%', 'LIKE');
+-      $query_or->condition('redirect_redirect__uri', $this->connection->escapeLike($path), 'LIKE');
+-      $query_or->condition('redirect_redirect__uri', $this->connection->escapeLike($path . '/') . '%', 'LIKE');
++      $or_group->condition('redirect_source.path', $path . '/', 'STARTS_WITH');
++      $or_group->condition('redirect_redirect.uri', $path, '=');
++      $or_group->condition('redirect_redirect.uri', $path . '/', 'STARTS_WITH');
+     }
++    $query->condition($or_group);
+ 
+     if ($langcode) {
+       $query->condition('language', $langcode);
+     }
+ 
+-    $query->condition($query_or);
+-    $rids = $query->execute()->fetchCol();
++    $rids = $query->execute();
+ 
+     if ($rids) {
+-      foreach ($this->loadMultiple($rids) as $redirect) {
+-        $redirect->delete();
+-      }
++      $storage->delete($storage->loadMultiple($rids));
+     }
+   }
+ 
+diff --git a/tests/src/Kernel/RedirectAPITest.php b/tests/src/Kernel/RedirectAPITest.php
+index 3b864a08db79c6d888289546d441501ab939cf2b..c3194d8c14c51bb4d787d4aea9b0f00060e3cd79 100644
+--- a/tests/src/Kernel/RedirectAPITest.php
++++ b/tests/src/Kernel/RedirectAPITest.php
+@@ -4,13 +4,18 @@ declare(strict_types=1);
+ 
+ namespace Drupal\Tests\redirect\Kernel;
+ 
++use Drupal\Core\Entity\EntityTypeManagerInterface;
+ use PHPUnit\Framework\Attributes\Group;
+ use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
+ use Drupal\language\Entity\ConfigurableLanguage;
+ use Drupal\redirect\Entity\Redirect;
++use Drupal\path_alias\Entity\PathAlias;
+ use Drupal\Core\Language\Language;
+ use Drupal\redirect\Exception\RedirectLoopException;
+ use Drupal\KernelTests\KernelTestBase;
++use Drupal\Tests\user\Traits\UserCreationTrait;
++use Drupal\Tests\workspaces\Kernel\WorkspaceTestTrait;
++use Drupal\workspaces\Entity\Workspace;
+ 
+ /**
+  * Redirect entity and redirect API test coverage.
+@@ -21,6 +26,14 @@ use Drupal\KernelTests\KernelTestBase;
+ #[RunTestsInSeparateProcesses]
+ class RedirectAPITest extends KernelTestBase {
+ 
++  use UserCreationTrait;
++  use WorkspaceTestTrait;
++
++  /**
++   * The entity type manager.
++   */
++  protected EntityTypeManagerInterface $entityTypeManager;
++
+   /**
+    * Modules to enable.
+    *
+@@ -443,6 +456,205 @@ class RedirectAPITest extends KernelTestBase {
+     $this->assertSame('The source path <em class="placeholder">lang-path?foo=bar</em> is already being redirected. Do you want to <a href="/admin/config/search/redirect/edit/3">edit the existing redirect</a>?', (string) $violations[0]->getMessage());
+   }
+ 
++  /**
++   * Test redirect entity revisions.
++   */
++  public function testRedirectRevisions(): void {
++    /** @var \Drupal\Core\Entity\ContentEntityStorageInterface $storage */
++    $storage = $this->container->get('entity_type.manager')->getStorage('redirect');
++    /** @var \Drupal\redirect\Entity\Redirect $redirect */
++    $redirect = $storage->create();
++
++    $redirect->setSource('some-url', ['revision' => 'default']);
++    $redirect->setRedirect('admin');
++    $redirect->save();
++    $this->assertEquals(Redirect::generateHash('some-url', ['revision' => 'default'], Language::LANGCODE_NOT_SPECIFIED), $redirect->getHash());
++
++    // Create a pending revision for the redirect and check if hash has been
++    // updated as expected.
++    $redirect->setSource('some-url', ['revision' => 'pending']);
++    $redirect->setNewRevision();
++    $redirect->isDefaultRevision(FALSE);
++    $redirect->save();
++
++    $this->assertEquals(2, $redirect->getRevisionId());
++    $this->assertFalse($redirect->isDefaultRevision());
++    $this->assertEquals(Redirect::generateHash('some-url', ['revision' => 'pending'], Language::LANGCODE_NOT_SPECIFIED), $redirect->getHash());
++
++    // Check that the hash of the default revision has not been changed.
++    /** @var \Drupal\redirect\Entity\Redirect $redirect */
++    $redirect = $storage->loadUnchanged($redirect->id());
++    $this->assertEquals(Redirect::generateHash('some-url', ['revision' => 'default'], Language::LANGCODE_NOT_SPECIFIED), $redirect->getHash());
++
++    // Check that the redirect repository still finds the default revision.
++    /** @var \Drupal\redirect\RedirectRepository $repository */
++    $repository = \Drupal::service('redirect.repository');
++    $redirect = $repository->findMatchingRedirect('some-url', ['revision' => 'default']);
++    $this->assertNotNull($redirect);
++    $this->assertEquals('/some-url?revision=default', $redirect->getSourceUrl());
++
++    // Make the pending revision the default one and check that the hash is
++    // correct.
++    $redirect = $storage->loadRevision(2);
++    $redirect->setNewRevision();
++    $redirect->isDefaultRevision(TRUE);
++    $redirect->save();
++
++    /** @var \Drupal\redirect\Entity\Redirect $redirect */
++    $redirect = $storage->loadUnchanged($redirect->id());
++    $this->assertEquals(3, $redirect->getRevisionId());
++    $this->assertTrue($redirect->isDefaultRevision());
++    $this->assertEquals(Redirect::generateHash('some-url', ['revision' => 'pending'], Language::LANGCODE_NOT_SPECIFIED), $redirect->getHash());
++  }
++
++  /**
++   * Test redirect entity logic in a workspace.
++   */
++  public function testRedirectWithWorkspaces(): void {
++    $this->initializeWorkspacesModule();
++    $this->switchToWorkspace('stage');
++
++    // Execute an existing test method in the context of an active workspace.
++    $this->testRedirectEntity();
++
++    /** @var \Drupal\redirect\RedirectRepository $repository */
++    $repository = \Drupal::service('redirect.repository');
++
++    // Check that the redirects created inside a workspace are not available in
++    // Live.
++    $this->switchToLive();
++
++    $redirect = $repository->findMatchingRedirect('another-url', ['key1' => 'val1'], 'de');
++    $this->assertNull($redirect);
++    $redirect = $repository->findMatchingRedirect('a-different-url', ['key1' => 'val1'], 'de');
++    $this->assertNull($redirect);
++    $redirect = $repository->findMatchingRedirect('google');
++    $this->assertNull($redirect);
++    $redirect = $repository->findMatchingRedirect('case-sensitive-path');
++    $this->assertNull($redirect);
++
++    // Publish the workspace and check that the redirects are now available in
++    // Live.
++    $this->workspaces['stage']->publish();
++
++    $redirect = $repository->findMatchingRedirect('another-url', ['key1' => 'val1'], 'de');
++    $this->assertNotNull($redirect);
++    $redirect = $repository->findMatchingRedirect('a-different-url', ['key1' => 'val1'], 'de');
++    $this->assertNotNull($redirect);
++    $redirect = $repository->findMatchingRedirect('google');
++    $this->assertNotNull($redirect);
++    $redirect = $repository->findMatchingRedirect('case-sensitive-path');
++    $this->assertNotNull($redirect);
++  }
++
++  /**
++   * Tests an alias change in Live after a workspace changed the same alias.
++   */
++  public function testPathAliasUpdateInLiveReusesWorkspaceRedirect(): void {
++    $this->initializeWorkspacesModule();
++    /** @var \Drupal\redirect\RedirectRepository $repository */
++    $repository = \Drupal::service('redirect.repository');
++
++    $path_alias = PathAlias::create([
++      'path' => '/user/1',
++      'alias' => '/old-alias',
++      'langcode' => 'en',
++    ]);
++    $path_alias->save();
++
++    // The workspace creates a redirect from the old alias. Live sees it as
++    // disabled until the workspace is published.
++    $this->switchToWorkspace('stage');
++    $this->updatePathAlias($path_alias->id(), '/stage-alias');
++    $stage_redirect = $repository->findMatchingRedirect('old-alias', [], 'en');
++    $this->assertNotNull($stage_redirect);
++
++    $this->switchToLive();
++    $this->assertNull($repository->findMatchingRedirect('old-alias', [], 'en'));
++    $this->updatePathAlias($path_alias->id(), '/live-alias');
++
++    $live_redirect = $repository->findMatchingRedirect('old-alias', [], 'en');
++    $this->assertNotNull($live_redirect);
++    $this->assertEquals($stage_redirect->id(), $live_redirect->id());
++    $this->assertSame('internal:/user/1', $live_redirect->getRedirect()['uri']);
++
++    $this->workspaces['stage']->publish();
++    $this->assertSourceRedirectCount(1, 'old-alias');
++    /** @var \Drupal\redirect\Entity\Redirect $redirect */
++    $redirect = \Drupal::entityTypeManager()->getStorage('redirect')->loadUnchanged($stage_redirect->id());
++    $this->assertTrue($redirect->isPublished());
++  }
++
++  /**
++   * Tests an alias change in a workspace after another workspace changed it.
++   */
++  public function testPathAliasUpdateInWorkspaceReusesOtherWorkspaceRedirect(): void {
++    $this->initializeWorkspacesModule();
++    $other = Workspace::create(['id' => 'other', 'label' => 'Other']);
++    $other->save();
++    /** @var \Drupal\redirect\RedirectRepository $repository */
++    $repository = \Drupal::service('redirect.repository');
++
++    $path_alias = PathAlias::create([
++      'path' => '/user/1',
++      'alias' => '/old-alias',
++      'langcode' => 'en',
++    ]);
++    $path_alias->save();
++
++    $this->switchToWorkspace('stage');
++    $this->updatePathAlias($path_alias->id(), '/stage-alias');
++    $stage_redirect = $repository->findMatchingRedirect('old-alias', [], 'en');
++    $this->assertNotNull($stage_redirect);
++
++    $this->switchToWorkspace('other');
++    $this->assertNull($repository->findMatchingRedirect('old-alias', [], 'en'));
++    $this->updatePathAlias($path_alias->id(), '/other-alias');
++    $other_redirect = $repository->findMatchingRedirect('old-alias', [], 'en');
++    $this->assertNotNull($other_redirect);
++    $this->assertEquals($stage_redirect->id(), $other_redirect->id());
++
++    // Live is not affected until a workspace is published.
++    $this->switchToLive();
++    $this->assertNull($repository->findMatchingRedirect('old-alias', [], 'en'));
++
++    $this->workspaces['stage']->publish();
++    $other->publish();
++    $this->assertSourceRedirectCount(1, 'old-alias');
++    $this->assertNotNull($repository->findMatchingRedirect('old-alias', [], 'en'));
++  }
++
++  /**
++   * Changes a path alias in the active workspace or in Live.
++   *
++   * @param int|string $id
++   *   The path alias ID.
++   * @param string $alias
++   *   The new alias.
++   */
++  protected function updatePathAlias(int|string $id, string $alias): void {
++    /** @var \Drupal\path_alias\PathAliasInterface $path_alias */
++    $path_alias = \Drupal::entityTypeManager()->getStorage('path_alias')->loadUnchanged($id);
++    $path_alias->setAlias($alias);
++    $path_alias->save();
++  }
++
++  /**
++   * Asserts how many redirects have a source path, in the active context.
++   *
++   * @param int $expected
++   *   The expected number of redirects.
++   * @param string $source_path
++   *   The source path.
++   */
++  protected function assertSourceRedirectCount(int $expected, string $source_path): void {
++    $ids = \Drupal::entityTypeManager()->getStorage('redirect')->getQuery()
++      ->accessCheck(FALSE)
++      ->condition('redirect_source.path', $source_path)
++      ->execute();
++    $this->assertCount($expected, $ids);
++  }
++
+   /**
+    * Tests that the source formatter escapes HTML in the source path.
+    */

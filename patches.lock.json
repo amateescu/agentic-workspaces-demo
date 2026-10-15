@@ -1,0 +1,77 @@
+{
+    "_hash": "88348a180de3269656a364d5bcf235eb675b87f950e52b8cfa2c2308dc646d4c",
+    "patches": {
+        "drupal/core": [
+            {
+                "package": "drupal/core",
+                "description": "#3624771 Keep the provider of hook-provided base fields (MR !17205, tests stripped)",
+                "url": "patches/core-keep-base-field-provider-on-entity-type-install.patch",
+                "sha256": "94055bb89db9e824b116584057aef9c5640276128f20d0e155e214930d991c47",
+                "depth": 2,
+                "extra": {
+                    "provenance": "root"
+                }
+            }
+        ],
+        "drupal/redirect": [
+            {
+                "package": "drupal/redirect",
+                "description": "#3313540 Convert redirect to revisionable (MR !138)",
+                "url": "patches/redirect-revisionable-workspace-support.patch",
+                "sha256": "11db7c98e1c34bd0ecb44ddd320c140fb464985b288a1c6b617c0f9d10ca5a45",
+                "depth": 1,
+                "extra": {
+                    "provenance": "root"
+                }
+            }
+        ],
+        "drupal/search_api": [
+            {
+                "package": "drupal/search_api",
+                "description": "#3624776 ReverseEntityReferences EntityFieldManager type hint (MR !360)",
+                "url": "patches/search_api-entity-field-manager-interface.patch",
+                "sha256": "eeb0977d8b0757432ee903a5f598abbdda80dd8d37c9dc1b984408fc2a1eb171",
+                "depth": 1,
+                "extra": {
+                    "provenance": "root"
+                }
+            }
+        ],
+        "drupal/tool_belt": [
+            {
+                "package": "drupal/tool_belt",
+                "description": "#3616166 Path aliases set with field_set_value are kept as manual aliases (MR !35)",
+                "url": "patches/tool_belt-manual-alias-turns-pathauto-off.patch",
+                "sha256": "fe5dbbf06f85eb9d73db20b394205eef4fea3563e1195919dac06f371f416521",
+                "depth": 1,
+                "extra": {
+                    "provenance": "root"
+                }
+            }
+        ],
+        "drupal/ai_agents": [
+            {
+                "package": "drupal/ai_agents",
+                "description": "#3586082 GetFieldDisplayForm on a field not in the display (MR !361)",
+                "url": "patches/ai_agents-display-form-default-formatter.patch",
+                "sha256": "cff5509ef8385d7a4338d5536907cec81728e1c7aa0adb7cc93385bf844a9bae",
+                "depth": 1,
+                "extra": {
+                    "provenance": "root"
+                }
+            }
+        ],
+        "drupal/project_browser": [
+            {
+                "package": "drupal/project_browser",
+                "description": "#3622921 Implement getModulesToInstall in TestModuleInstaller",
+                "url": "https://git.drupalcode.org/issue/project_browser-3622921/-/commit/9afcce0676ca61ca1514a14b6d882cbd081c0045.diff",
+                "sha256": "56fb6668c88cf2d6dc81d91a2cc85d0dae112d5d83053230fe18402674cfdf8a",
+                "depth": 1,
+                "extra": {
+                    "provenance": "dependency:drupal/project_browser"
+                }
+            }
+        ]
+    }
+}

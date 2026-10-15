@@ -1,0 +1,47 @@
+search_api #3624776 (MR !360 at 0264f90d22), against 8.x-1.x.
+diff --git a/src/Plugin/search_api/processor/ReverseEntityReferences.php b/src/Plugin/search_api/processor/ReverseEntityReferences.php
+index bde4105d38616a7b247e19ad8b96a44def9314ee..11b81d60a0886c49aba96b970ca7f47c76358fc5 100644
+--- a/src/Plugin/search_api/processor/ReverseEntityReferences.php
++++ b/src/Plugin/search_api/processor/ReverseEntityReferences.php
+@@ -7,7 +7,7 @@ use Drupal\Component\Plugin\Exception\PluginNotFoundException;
+ use Drupal\Core\Cache\Cache;
+ use Drupal\Core\Cache\CacheBackendInterface;
+ use Drupal\Core\Entity\ContentEntityTypeInterface;
+-use Drupal\Core\Entity\EntityFieldManager;
++use Drupal\Core\Entity\EntityFieldManagerInterface;
+ use Drupal\Core\Entity\EntityInterface;
+ use Drupal\Core\Entity\EntityTypeBundleInfoInterface;
+ use Drupal\Core\Entity\EntityTypeManagerInterface;
+@@ -55,7 +55,7 @@ class ReverseEntityReferences extends ProcessorPluginBase {
+   /**
+    * The entity field manager.
+    *
+-   * @var \Drupal\Core\Entity\EntityFieldManager|null
++   * @var \Drupal\Core\Entity\EntityFieldManagerInterface|null
+    */
+   protected $entityFieldManager;
+ 
+@@ -122,7 +122,7 @@ class ReverseEntityReferences extends ProcessorPluginBase {
+   /**
+    * Retrieves the entity field manager.
+    *
+-   * @return \Drupal\Core\Entity\EntityFieldManager
++   * @return \Drupal\Core\Entity\EntityFieldManagerInterface
+    *   The entity field manager.
+    */
+   public function getEntityFieldManager() {
+@@ -132,12 +132,12 @@ class ReverseEntityReferences extends ProcessorPluginBase {
+   /**
+    * Sets the entity field manager.
+    *
+-   * @param \Drupal\Core\Entity\EntityFieldManager $entity_field_manager
++   * @param \Drupal\Core\Entity\EntityFieldManagerInterface $entity_field_manager
+    *   The new entity field manager.
+    *
+    * @return $this
+    */
+-  public function setEntityFieldManager(EntityFieldManager $entity_field_manager) {
++  public function setEntityFieldManager(EntityFieldManagerInterface $entity_field_manager) {
+     $this->entityFieldManager = $entity_field_manager;
+     return $this;
+   }

@@ -1,0 +1,112 @@
+ai_agents #3586082 (MR !361 at 390a31f35a), against 1.3.x.
+diff --git a/src/Plugin/AiFunctionCall/GetFieldDisplayForm.php b/src/Plugin/AiFunctionCall/GetFieldDisplayForm.php
+index ecf6de821198c68e440e7069924992f7a468627a..b895917a08fc9d0324764b8939f945aa1d983204 100644
+--- a/src/Plugin/AiFunctionCall/GetFieldDisplayForm.php
++++ b/src/Plugin/AiFunctionCall/GetFieldDisplayForm.php
+@@ -185,9 +185,14 @@ class GetFieldDisplayForm extends FunctionCallBase implements ExecutableFunction
+ 
+     // Check what type of display it is.
+     if ($type_of_display === 'form') {
+-      // If the wanted widget, doesn't exist, get the current one.
++      // Without a wanted widget, use the one the display has. A field that is
++      // not in the display yet falls back to the default widget of its field
++      // type.
+       if (!$wanted_widget) {
+-        $wanted_widget = $this->entityDisplayRepository->getFormDisplay($entity_type, $bundle)->getComponent($field_name)['type'];
++        $component = $this->entityDisplayRepository->getFormDisplay($entity_type, $bundle)->getComponent($field_name);
++        $wanted_widget = $component['type']
++          ?? $this->fieldTypeManager->getDefinition($fields[$field_name]->getType())['default_widget']
++          ?? '';
+       }
+       // Check if the wanted widget exists.
+       if (!$this->fieldWidgetManager->hasDefinition($wanted_widget)) {
+@@ -214,9 +219,14 @@ class GetFieldDisplayForm extends FunctionCallBase implements ExecutableFunction
+       }
+     }
+     else {
+-      // If the wanted widget, doesn't exist, get the current one.
++      // Without a wanted formatter, use the one the display has. A field that
++      // is not in the display yet falls back to the default formatter of its
++      // field type.
+       if (!$wanted_widget) {
+-        $wanted_widget = $this->entityDisplayRepository->getViewDisplay($entity_type, $bundle)->getComponent($field_name)['type'];
++        $component = $this->entityDisplayRepository->getViewDisplay($entity_type, $bundle)->getComponent($field_name);
++        $wanted_widget = $component['type']
++          ?? $this->fieldTypeManager->getDefinition($fields[$field_name]->getType())['default_formatter']
++          ?? '';
+       }
+       // Check if the wanted widget exists.
+       if (!$this->fieldFormatterManager->hasDefinition($wanted_widget)) {
+diff --git a/tests/src/Kernel/Plugin/AiFunctionCall/GetFieldDisplayFormTest.php b/tests/src/Kernel/Plugin/AiFunctionCall/GetFieldDisplayFormTest.php
+index d6e2b25f5a7d88cd19e6798f3ab368ac0c92aca2..90c4965299694ce8fab3fd6fea46985fdfd89cb4 100644
+--- a/tests/src/Kernel/Plugin/AiFunctionCall/GetFieldDisplayFormTest.php
++++ b/tests/src/Kernel/Plugin/AiFunctionCall/GetFieldDisplayFormTest.php
+@@ -170,10 +170,26 @@ final class GetFieldDisplayFormTest extends KernelTestBase {
+         ],
+       ])
+       ->save();
++
++    // A field that is left out of both displays, like one the field agent has
++    // just created.
++    $this->entityTypeManager->getStorage('field_storage_config')->create([
++      'field_name' => 'field_tagline',
++      'entity_type' => 'node',
++      'type' => 'string',
++      'cardinality' => 1,
++    ])->save();
++    $this->entityTypeManager->getStorage('field_config')->create([
++      'field_name' => 'field_tagline',
++      'entity_type' => 'node',
++      'bundle' => 'article',
++      'label' => 'Tagline',
++      'required' => FALSE,
++    ])->save();
+   }
+ 
+   /**
+-   * Get field display form as admin.
++   * Get field display form as admin, placed in the display or not.
+    */
+   public function testToGetDisplayFormAsAdmin(): void {
+     // Make sure that the current user is an admin.
+@@ -198,6 +214,15 @@ final class GetFieldDisplayFormTest extends KernelTestBase {
+     $this->assertStringContainsString('form_settings', $result, 'The result contains form settings.');
+     $this->assertStringContainsString("rows", $result, 'The result contains the rows setting.');
+     $this->assertStringContainsString("placeholder", $result, 'The result contains the placeholder setting.');
++
++    // A field that is not in the form display falls back to the default widget
++    // of its field type, instead of failing on a missing component.
++    $tool->setContextValue('field_name', 'field_tagline');
++    $tool->execute();
++
++    $result = $tool->getReadableOutput();
++    $this->assertStringContainsString('form_settings', $result, 'The result contains form settings.');
++    $this->assertStringContainsString('size', $result, 'The result contains the size setting of the default string widget.');
+   }
+ 
+   /**
+@@ -225,7 +250,7 @@ final class GetFieldDisplayFormTest extends KernelTestBase {
+   }
+ 
+   /**
+-   * Get the field view display form as admin.
++   * Get the field view display form as admin, placed in the display or not.
+    */
+   public function testToGetViewDisplayFormAsAdmin(): void {
+     // Make sure that the current user is an admin.
+@@ -248,6 +273,15 @@ final class GetFieldDisplayFormTest extends KernelTestBase {
+     // Check so the result is string and contains the field information.
+     $this->assertIsString($result, 'The result is a string.');
+     $this->assertStringContainsString('view_settings', $result, 'The result contains view settings.');
++
++    // A field that is not in the view display falls back to the default
++    // formatter of its field type, instead of failing on a missing component.
++    $tool->setContextValue('field_name', 'field_tagline');
++    $tool->execute();
++
++    $result = $tool->getReadableOutput();
++    $this->assertStringContainsString('view_settings', $result, 'The result contains view settings.');
++    $this->assertStringContainsString('link_to_entity', $result, 'The result contains the setting of the default string formatter.');
+   }
+ 
+ }
